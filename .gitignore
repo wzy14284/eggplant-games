@@ -1,0 +1,9 @@
+# 依赖
+node_modules/
+
+# 运行时产物（部署脚本生成的 PID/日志/地址）
+.run/
+
+# 通用
+.DS_Store
+*.log

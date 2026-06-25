@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>茄子王游戏大厅</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="container">
+    <header class="brand">
+      <span class="brand-logo" id="brandHome">🍆</span>
+      <span class="brand-name" id="brandHome2">茄子王游戏大厅</span>
+    </header>
+    <div id="status" class="status"></div>
+
+    <!-- 首页 -->
+    <section id="homeView" class="view">
+      <div class="hero">
+        <div class="hero-emoji">🍆</div>
+        <h1 class="hero-title">茄子王游戏大厅</h1>
+        <p class="hero-sub">和好友在浏览器里下棋，无需注册，开房即玩。</p>
+      </div>
+      <div class="entry-grid">
+        <button class="entry-card primary" id="homeCreateBtn">
+          <span class="entry-emoji">➕</span>
+          <span class="entry-title">创建房间</span>
+          <span class="entry-desc">选个游戏，开个房，把房间码发给朋友</span>
+        </button>
+        <button class="entry-card" id="homeJoinBtn">
+          <span class="entry-emoji">🔑</span>
+          <span class="entry-title">加入房间</span>
+          <span class="entry-desc">输入朋友给的房间码加入对局</span>
+        </button>
+        <button class="entry-card" id="homeAboutBtn">
+          <span class="entry-emoji">📖</span>
+          <span class="entry-title">平台说明</span>
+          <span class="entry-desc">玩法、对局操作、掉线与安全说明</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- 创建房间 -->
+    <section id="createView" class="view hidden">
+      <div class="card">
+        <h2>创建房间</h2>
+        <label>你的名字 <input id="createName" placeholder="昵称" maxlength="16"></label>
+        <label>选择游戏 <select id="gameSelect"><option>加载中…</option></select></label>
+        <label class="optional">房间密码（可选）<input id="createPwd" type="password" placeholder="留空则无密码"></label>
+        <div class="actions">
+          <button id="createBtn" class="primary">创建房间</button>
+          <button id="createBackBtn" class="ghost">返回</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 加入房间 -->
+    <section id="joinView" class="view hidden">
+      <div class="card">
+        <h2>加入房间</h2>
+        <label>你的名字 <input id="joinName" placeholder="昵称" maxlength="16"></label>
+        <label>房间码 <input id="joinCode" placeholder="6 位房间码" maxlength="6" style="text-transform:uppercase"></label>
+        <label class="optional">房间密码（如有）<input id="joinPwd" type="password"></label>
+        <div class="actions">
+          <button id="joinBtn" class="primary">加入房间</button>
+          <button id="joinBackBtn" class="ghost">返回</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 平台说明 -->
+    <section id="aboutView" class="view hidden">
+      <div class="card">
+        <h2>平台说明</h2>
+        <div class="about">
+          <h3>怎么玩</h3>
+          <p>一方「创建房间」拿到 6 位房间码，把房间码发给朋友；朋友「加入房间」输入房间码即可。房主点「开始游戏」，双方在浏览器里对战。</p>
+          <h3>支持的游戏</h3>
+          <ul>
+            <li><b>五子棋</b>：横竖斜连成五子者胜。</li>
+            <li><b>围棋</b>：提子、禁着、超级劫；双方停手后标记死子、确认数目（中国规则，白方贴目 6.5）。</li>
+            <li><b>中国象棋</b>：完整走法与将军/将死/困毙；点棋子选中，绿点为可走点。</li>
+          </ul>
+          <h3>对局中可操作</h3>
+          <ul>
+            <li><b>悔棋</b>：回退最后一手，需对方同意，10 秒无响应自动拒绝。</li>
+            <li><b>和棋</b>：需对方同意，10 秒无响应自动拒绝。</li>
+            <li><b>认输</b>：立即判负。</li>
+            <li><b>返回房间</b>：一局结束后再来一局（玩家不散、房间码不变）。</li>
+          </ul>
+          <h3>掉线宽限</h3>
+          <p>对局中一方断线，对方会看到提示；30 秒内重连可续上原局，超时则断线方判负。关闭浏览器等同于掉线，30 秒后判负。</p>
+          <h3>安全说明</h3>
+          <p>服务只运行在房主的电脑上，通过 Cloudflare Tunnel 暴露公网访问，路由器不开端口、外网扫不到。房间码作为基础访问控制，也可设房间密码。临时公网域名每次启动会变，以房主分享的为准。</p>
+        </div>
+        <div class="actions"><button id="aboutBackBtn" class="ghost">返回</button></div>
+      </div>
+    </section>
+
+    <!-- 房间等待视图 -->
+    <section id="roomView" class="view hidden">
+      <div class="card">
+        <h2>房间 <span id="roomCodeDisplay"></span></h2>
+        <p id="roomInfo"></p>
+        <ul id="playerList" class="player-list"></ul>
+        <div class="actions">
+          <button id="startBtn" class="primary hidden">开始游戏</button>
+          <button id="copyBtn">复制房间码</button>
+          <button id="leaveBtn" class="ghost">离开房间</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 游戏视图（由对应游戏的渲染器挂载） -->
+    <section id="gameView" class="view hidden">
+      <div class="card">
+        <div id="reqBanner" class="req-banner hidden"></div>
+        <div id="gameMount"></div>
+        <div class="game-footer">
+          <button id="undoBtn">悔棋</button>
+          <button id="drawBtn">和棋</button>
+          <button id="resignBtn">认输</button>
+          <button id="rematchBtn" class="primary hidden">返回房间</button>
+          <button id="backBtn" class="ghost">返回大厅</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="lobby.js"></script>
+</body>
+</html>
