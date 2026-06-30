@@ -6,8 +6,9 @@ import { GameClient } from './client.js';
 import { GomokuRenderer } from './gomoku.js';
 import { WeiqiRenderer } from './weiqi.js';
 import { XiangqiRenderer } from './xiangqi.js';
+import { DoudizhuRenderer } from './doudizhu.js';
 
-const renderers = { gomoku: GomokuRenderer, weiqi: WeiqiRenderer, xiangqi: XiangqiRenderer }; // 新增游戏在此登记
+const renderers = { gomoku: GomokuRenderer, weiqi: WeiqiRenderer, xiangqi: XiangqiRenderer, doudizhu: DoudizhuRenderer }; // 新增游戏在此登记
 
 const client = new GameClient();
 const $ = (id) => document.getElementById(id);
@@ -34,8 +35,9 @@ function goHome() { show('homeView'); setStatus(''); }
 // ---- 控制按钮可用性 ----
 function updateControls() {
   const over = !inGame;
-  $('undoBtn').classList.toggle('hidden', over || gamePhase !== 'play');
-  $('drawBtn').classList.toggle('hidden', over);
+  const noUndoDraw = session?.gameType === 'doudizhu';
+  $('undoBtn').classList.toggle('hidden', over || gamePhase !== 'play' || noUndoDraw);
+  $('drawBtn').classList.toggle('hidden', over || noUndoDraw);
   $('resignBtn').classList.toggle('hidden', over);
 }
 

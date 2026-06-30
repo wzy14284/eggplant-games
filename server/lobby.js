@@ -104,23 +104,32 @@ class Room {
     return !!this.pendingReq || !!this.grace;
   }
 
-  /** 当前对手（相对 fromId） */
+  /** 当前对手（相对 fromId，2 人游戏便捷方法） */
   opponentOf(playerId) {
     return this.players.find((p) => p.id !== playerId);
+  }
+
+  /** 所有对手（3+ 人游戏） */
+  opponentsOf(playerId) {
+    return this.players.filter((p) => p.id !== playerId);
   }
 
   /** 发起悔棋/和棋请求 */
   request(playerId, reqType) {
     if (!this.gameActive()) return { ok: false, error: '当前无法申请' };
     if (this.pendingReq) return { ok: false, error: '已有待处理请求' };
-    const opp = this.opponentOf(playerId);
-    if (!opp) return { ok: false, error: '找不到对手' };
-    if (!opp.connected) return { ok: false, error: '对方掉线中，暂不能申请' };
+    if (this.game && !this.game.supportsUndoDraw()) return { ok: false, error: '当前游戏不支持悔棋/和棋' };
+    const opps = this.opponentsOf(playerId);
+    if (opps.length === 0) return { ok: false, error: '找不到对手' };
+    if (opps.some(o => !o.connected)) return { ok: false, error: '有对手掉线中，暂不能申请' };
     this.pendingReq = { reqType, fromId: playerId };
     // 给申请方确认
     this.send(this.playerById(playerId), { type: S2C.REQ_SENT, reqType });
-    // 给决策方（对手）
-    this.send(opp, { type: S2C.REQ, reqType, fromId: playerId, fromName: this.playerById(playerId).name });
+    // 给所有对手
+    const fromName = this.playerById(playerId).name;
+    for (const opp of opps) {
+      this.send(opp, { type: S2C.REQ, reqType, fromId: playerId, fromName });
+    }
     // 10s 超时自动拒绝
     this.pendingReq.timer = setTimeout(() => {
       if (this.pendingReq && this.pendingReq.fromId === playerId) {
@@ -134,8 +143,8 @@ class Room {
   respond(playerId, accept) {
     if (!this.pendingReq) return { ok: false, error: '没有待处理请求' };
     if (this.pendingReq.fromId === playerId) return { ok: false, error: '不能应答自己的请求' };
-    const opp = this.opponentOf(this.pendingReq.fromId);
-    if (playerId !== (opp && opp.id)) return { ok: false, error: '只有对手可以应答' };
+    const opps = this.opponentsOf(this.pendingReq.fromId);
+    if (!opps.some(o => o.id === playerId)) return { ok: false, error: '只有对手可以应答' };
     this.resolveReq(accept, accept ? 'accepted' : 'rejected');
     return { ok: true };
   }
@@ -304,6 +313,7 @@ export class Lobby {
               }, GRACE_MS),
             };
             room.broadcast({ type: S2C.PLAYER_DC, playerName: p.name, grace: Math.round(GRACE_MS / 1000) });
+            // 掉线通知改为 broadcast（已包含所有在线玩家），无需单独处理
           }
         } else {
           // 非游戏中：直接移除
@@ -439,8 +449,10 @@ export class Lobby {
         sess.playerId = slot.id;
         sess.roomId = room.id;
         room.clearGrace();
-        const opp = room.opponentOf(slot.id);
-        if (opp) room.send(opp, { type: S2C.PLAYER_RC, playerName: slot.name });
+        // 通知所有其他玩家
+        for (const opp of room.opponentsOf(slot.id)) {
+          room.send(opp, { type: S2C.PLAYER_RC, playerName: slot.name });
+        }
         room.sendFullState(slot);
         return;
       }

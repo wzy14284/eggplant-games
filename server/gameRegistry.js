@@ -5,6 +5,7 @@
 import Gomoku from './games/gomoku.js';
 import Weiqi from './games/weiqi.js';
 import Xiangqi from './games/xiangqi.js';
+import Doudizhu from './games/doudizhu.js';
 
 const registry = new Map(); // id -> GameClass
 
@@ -28,4 +29,5 @@ export function registerBuiltins() {
   registerGame(Gomoku);
   registerGame(Weiqi);
   registerGame(Xiangqi);
+  registerGame(Doudizhu);
 }

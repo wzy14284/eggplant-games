@@ -41,10 +41,15 @@ export class BaseGame {
     this.result = result;
   }
 
-  /** 弃权/认输：playerId 判负，对手获胜 */
+  /** 弃权/认输：playerId 判负，其他所有玩家获胜 */
   forfeit(playerId) {
-    const opp = this.players.find((p) => p.id !== playerId);
-    this.forceOver({ winnerId: opp ? opp.id : null, reason: 'forfeit' });
+    const winners = this.players.filter((p) => p.id !== playerId).map((p) => p.id);
+    this.forceOver({ winnerId: winners[0] || null, winnerIds: winners, loserId: playerId, reason: 'forfeit' });
+  }
+
+  /** 是否支持悔棋/和棋（斗地主等游戏可覆盖返回 false） */
+  supportsUndoDraw() {
+    return true;
   }
 
   /** 和棋 */
