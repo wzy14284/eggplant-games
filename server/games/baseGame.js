@@ -29,10 +29,20 @@ export class BaseGame {
   constructor(players, options = {}) {
     this.players = players; // [{id, name, index}]
     this.options = options;
+    this.hooks = options.hooks || null; // { schedule, clear, notify } 宿主注入的自主推进通道
     this.phase = 'play'; // 'play' | 'over'（部分游戏如围棋另有 'scoring'）
     this.over = false;
     this.result = null;
   }
+
+  /** 自主启动钩子：需自主推进状态的游戏（如斗地主发牌延时、叫地主倒计时）覆盖此方法。
+   *  宿主在实例化并广播首帧后调用。 */
+  start() {}
+
+  /** 自主状态变更后通知宿主重新广播（子类在定时器回调里调用） */
+  _notify() { this.hooks?.notify?.(); }
+  _schedule(fn, ms) { return this.hooks?.schedule?.(fn, ms) ?? null; }
+  _clearTimer(handle) { this.hooks?.clear?.(handle); }
 
   /** 强制结束并设定结果（认输/和棋/弃权通用入口） */
   forceOver(result) {

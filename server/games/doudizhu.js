@@ -10,6 +10,13 @@ const SUIT_SPADE = 0, SUIT_HEART = 1, SUIT_DIAMOND = 2, SUIT_CLUB = 3;
 const SUIT_NAMES = ['♠', '♥', '♦', '♣'];
 const RANK_DISPLAY = { 3:'3',4:'4',5:'5',6:'6',7:'7',8:'8',9:'9',10:'10',11:'J',12:'Q',13:'K',14:'A',15:'2',16:'小王',17:'大王' };
 
+// ── 时序常量 ──
+const DEAL_LOOK_MS = 5400;  // 发牌动画 17×0.2s ≈ 3.4s + 看牌 2s
+const BID_CALL_MS = 5000;   // 叫地主倒计时
+const BID_GRAB_MS = 3000;   // 抢地主倒计时
+const PLAY_MS = 30000;      // 出牌倒计时
+const NO_PLAY_MS = 3000;    // 无牌可出时倒计时
+
 // 牌型常量
 const TYPE = {
   SINGLE: 'single', PAIR: 'pair', TRIPLE: 'triple',
@@ -214,6 +221,180 @@ function canBeat(a, b) {
   return a.rank > b.rank;
 }
 
+/**
+ * 找一手能压过 last 的牌（用于「提示」与「无牌可出」判定）。
+ * 优先同类型更大；找不到则尝试炸弹/火箭。返回牌数组或 null。
+ */
+function findHint(hand, last) {
+  if (!last || hand.length === 0) return null;
+  const counts = rankCounts(hand);
+  const ranksSorted = [...counts.keys()].sort((a, b) => a - b);
+  const cardOf = r => hand.find(c => c.rank === r);
+  const cardsOf = (r, n) => hand.filter(c => c.rank === r).slice(0, n);
+
+  // 火箭压一切，无解
+  if (last.type === TYPE.ROCKET) return null;
+
+  const hasRocket = counts.has(SMALL_JOKER) && counts.has(BIG_JOKER);
+  const rocket = () => [cardOf(SMALL_JOKER), cardOf(BIG_JOKER)];
+
+  // 炸弹：压更小炸弹
+  if (last.type === TYPE.BOMB) {
+    for (const r of ranksSorted) {
+      if (counts.get(r) === 4 && r > last.rank) return cardsOf(r, 4);
+    }
+    return hasRocket ? rocket() : null;
+  }
+
+  // 非炸弹：先试同类型更大
+  const same = findSameTypeBeat(hand, counts, ranksSorted, cardOf, cardsOf, last);
+  if (same) return same;
+
+  // 再试炸弹（压非炸弹）/ 火箭
+  for (const r of ranksSorted) {
+    if (counts.get(r) === 4) return cardsOf(r, 4);
+  }
+  return hasRocket ? rocket() : null;
+}
+
+/** 同类型压牌：返回一手同类型且更大的牌，或 null。 */
+function findSameTypeBeat(hand, counts, ranksSorted, cardOf, cardsOf, last) {
+  switch (last.type) {
+    case TYPE.SINGLE:
+      for (const r of ranksSorted) if (r > last.rank) return [cardOf(r)];
+      return null;
+    case TYPE.PAIR:
+      for (const r of ranksSorted) if (counts.get(r) >= 2 && r > last.rank) return cardsOf(r, 2);
+      return null;
+    case TYPE.TRIPLE:
+      for (const r of ranksSorted) if (counts.get(r) >= 3 && r > last.rank) return cardsOf(r, 3);
+      return null;
+    case TYPE.TRIPLE_ONE: {
+      for (const r of ranksSorted) {
+        if (counts.get(r) >= 3 && r > last.rank) {
+          const kicker = hand.find(c => c.rank !== r);
+          if (kicker) return [...cardsOf(r, 3), kicker];
+        }
+      }
+      return null;
+    }
+    case TYPE.TRIPLE_PAIR: {
+      for (const r of ranksSorted) {
+        if (counts.get(r) >= 3 && r > last.rank) {
+          for (const r2 of ranksSorted) {
+            if (r2 !== r && counts.get(r2) >= 2) return [...cardsOf(r, 3), ...cardsOf(r2, 2)];
+          }
+        }
+      }
+      return null;
+    }
+    case TYPE.STRAIGHT: {
+      const L = last.length;
+      for (let s = Math.max(RANK_3, last.rank - L + 2); s + L - 1 <= 14; s++) {
+        if ([...Array(L).keys()].every(k => counts.has(s + k))) {
+          return [...Array(L).keys()].map(k => cardOf(s + k));
+        }
+      }
+      return null;
+    }
+    case TYPE.STRAIGHT_PAIR: {
+      const L = last.length;
+      for (let s = Math.max(RANK_3, last.rank - L + 2); s + L - 1 <= 14; s++) {
+        if ([...Array(L).keys()].every(k => (counts.get(s + k) || 0) >= 2)) {
+          const out = [];
+          for (let k = 0; k < L; k++) out.push(...cardsOf(s + k, 2));
+          return out;
+        }
+      }
+      return null;
+    }
+    case TYPE.PLANE: {
+      const L = last.length;
+      for (let s = Math.max(RANK_3, last.rank - L + 2); s + L - 1 <= 14; s++) {
+        if ([...Array(L).keys()].every(k => (counts.get(s + k) || 0) >= 3)) {
+          const out = [];
+          for (let k = 0; k < L; k++) out.push(...cardsOf(s + k, 3));
+          return out;
+        }
+      }
+      return null;
+    }
+    case TYPE.PLANE_SINGLE: {
+      const L = last.length;
+      for (let s = Math.max(RANK_3, last.rank - L + 2); s + L - 1 <= 14; s++) {
+        const planeRanks = [...Array(L).keys()].map(k => s + k);
+        if (!planeRanks.every(r => (counts.get(r) || 0) >= 3)) continue;
+        // 找 L 张单张翅膀（非飞机 rank）
+        const kickers = [];
+        for (const r of ranksSorted) {
+          if (planeRanks.includes(r)) continue;
+          kickers.push(cardOf(r));
+          if (kickers.length >= L) break;
+        }
+        if (kickers.length >= L) {
+          const out = [];
+          for (const r of planeRanks) out.push(...cardsOf(r, 3));
+          out.push(...kickers.slice(0, L));
+          return out;
+        }
+      }
+      return null;
+    }
+    case TYPE.PLANE_PAIR: {
+      const L = last.length;
+      for (let s = Math.max(RANK_3, last.rank - L + 2); s + L - 1 <= 14; s++) {
+        const planeRanks = [...Array(L).keys()].map(k => s + k);
+        if (!planeRanks.every(r => (counts.get(r) || 0) >= 3)) continue;
+        const pairRanks = [];
+        for (const r of ranksSorted) {
+          if (planeRanks.includes(r)) continue;
+          if (counts.get(r) >= 2) { pairRanks.push(r); if (pairRanks.length >= L) break; }
+        }
+        if (pairRanks.length >= L) {
+          const out = [];
+          for (const r of planeRanks) out.push(...cardsOf(r, 3));
+          for (const r of pairRanks.slice(0, L)) out.push(...cardsOf(r, 2));
+          return out;
+        }
+      }
+      return null;
+    }
+    case TYPE.FOUR_TWO: {
+      for (const r of ranksSorted) {
+        if (counts.get(r) === 4 && r > last.rank) {
+          const kickers = [];
+          for (const r2 of ranksSorted) {
+            if (r2 === r) continue;
+            kickers.push(cardOf(r2));
+            if (kickers.length >= 2) break;
+          }
+          if (kickers.length >= 2) return [...cardsOf(r, 4), ...kickers.slice(0, 2)];
+        }
+      }
+      return null;
+    }
+    case TYPE.FOUR_TWO_PAIR: {
+      for (const r of ranksSorted) {
+        if (counts.get(r) === 4 && r > last.rank) {
+          const pairRanks = [];
+          for (const r2 of ranksSorted) {
+            if (r2 === r) continue;
+            if (counts.get(r2) >= 2) { pairRanks.push(r2); if (pairRanks.length >= 2) break; }
+          }
+          if (pairRanks.length >= 2) {
+            const out = cardsOf(r, 4);
+            for (const r2 of pairRanks.slice(0, 2)) out.push(...cardsOf(r2, 2));
+            return out;
+          }
+        }
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
 // ── 主类 ──
 export default class Doudizhu extends BaseGame {
   static metadata = {
@@ -235,12 +416,15 @@ export default class Doudizhu extends BaseGame {
     this.dizhuCards = [deck[51], deck[52], deck[53]];
     for (let i = 0; i < 3; i++) this.hands[i] = sortCards(this.hands[i]);
 
-    // 叫地主
-    this.bidStarter = Math.floor(Math.random() * 3);
+    // 叫地主 / 抢地主
+    this.bidStarter = Math.floor(Math.random() * 3); // 随机首发
     this.bidCurrent = this.bidStarter;
-    this.bidHistory = [];
-    this.bidPassCount = 0;
-    this.lastBidder = -1;
+    this.bidHistory = [];          // { index, action: 'call'|'pass'|'grab'|'giveup' }
+    this.bidPhase = 'call';        // 'call'（叫地主）| 'grab'（抢地主）
+    this.lastGrabber = -1;         // 最后一个叫/抢的人（地主候选人）
+    this.grabbedSet = new Set();   // 已抢过地主的玩家（每人最多抢一次）
+    this.grabCount = 0;            // 抢地主次数（每次 ×2）
+    this.redealCount = 0;          // 流局重发次数
     this.landlordIndex = -1;
 
     // 出牌
@@ -253,15 +437,33 @@ export default class Doudizhu extends BaseGame {
     // 积分
     this.scores = [0, 0, 0];
 
-    this.phase = 'bidding';
+    // 时序：发牌 → 看牌 → 叫地主
+    this._dealTimer = null;
+    this._bidTimer = null;
+    this.bidDeadline = null;   // 当前叫/抢回合截止时刻（ms epoch），null=无倒计时
+    this._playTimer = null;
+    this.playDeadline = null;  // 当前出牌回合截止时刻（ms epoch），null=无倒计时
+
+    this.phase = 'dealing';
     this.over = false;
     this.result = null;
+  }
+
+  /** 宿主实例化并广播首帧后调用：延时 DEAL_LOOK_MS 后进入叫地主 */
+  start() {
+    this._dealTimer = this._schedule(() => {
+      this._dealTimer = null;
+      if (this.over) return;
+      this.phase = 'bidding';
+      this._setBidTimer();
+      this._notify();
+    }, DEAL_LOOK_MS);
   }
 
   supportsUndoDraw() { return false; }
 
   getCurrentPlayerId() {
-    if (this.over) return null;
+    if (this.over || this.phase === 'dealing') return null;
     const idx = this.phase === 'bidding' ? this.bidCurrent : this.currentTurn;
     if (idx < 0) return null;
     const p = this.players.find(p => p.index === idx);
@@ -273,43 +475,173 @@ export default class Doudizhu extends BaseGame {
     const p = this.players.find(p => p.id === playerId);
     if (!p) return { ok: false, error: '玩家不存在' };
 
+    if (this.phase === 'dealing') return { ok: false, error: '发牌中，请稍候' };
     if (this.phase === 'bidding') return this._doBid(p, action);
     if (this.phase === 'play') return this._doPlay(p, action);
     return { ok: false, error: '当前阶段不能操作' };
   }
 
   _doBid(player, action) {
-    if (player.index !== this.bidCurrent) return { ok: false, error: '还没轮到你叫地主' };
-    const { bid } = action;
-    if (typeof bid !== 'boolean') return { ok: false, error: '请选"叫地主"或"不叫"' };
+    if (player.index !== this.bidCurrent) return { ok: false, error: '还没轮到你' };
 
-    this.bidHistory.push({ index: player.index, bid });
-    const nextIdx = (this.bidCurrent + 1) % 3;
+    // ── 叫地主阶段 ──
+    if (this.bidPhase === 'call') {
+      const { bid } = action;
+      if (typeof bid !== 'boolean') return { ok: false, error: '请选"叫地主"或"不叫"' };
+      this._clearBidTimer();
+      this.bidHistory.push({ index: player.index, action: bid ? 'call' : 'pass' });
 
-    if (bid) this.lastBidder = player.index;
-    else this.bidPassCount++;
-
-    // 所有 3 人各叫/抢一次
-    if (this.bidHistory.length >= 3) {
-      this._resolveBid();
-    } else {
-      this.bidCurrent = nextIdx;
+      if (bid) {
+        // 有人叫地主 → 进入抢地主阶段，由其下家开始抢
+        this.lastGrabber = player.index;
+        this.bidPhase = 'grab';
+        this.grabbedSet = new Set();
+        this.bidCurrent = (player.index + 1) % 3;
+        this._bidAutoAdvance();
+      } else {
+        // 不叫 → 下一个
+        this.bidCurrent = (player.index + 1) % 3;
+        // 三人都不叫 → 流局重发
+        const passes = this.bidHistory.filter(h => h.action === 'pass').length;
+        if (passes >= 3) this._redeal();
+      }
+      this._setBidTimer();
+      return { ok: true };
     }
+
+    // ── 抢地主阶段 ──
+    const { grab } = action;
+    if (typeof grab !== 'boolean') return { ok: false, error: '请选"抢地主"或"不抢"' };
+    if (grab && this.grabbedSet.has(player.index)) {
+      return { ok: false, error: '你已经抢过地主了' };
+    }
+    this._clearBidTimer();
+
+    if (grab) {
+      this.bidHistory.push({ index: player.index, action: 'grab' });
+      this.grabbedSet.add(player.index);
+      this.grabCount++;
+      this.lastGrabber = player.index;
+    } else {
+      this.bidHistory.push({ index: player.index, action: 'giveup' });
+    }
+
+    this.bidCurrent = (player.index + 1) % 3;
+    this._bidAutoAdvance();
+    this._setBidTimer();
     return { ok: true };
   }
 
-  _resolveBid() {
-    if (this.lastBidder >= 0) {
-      this.landlordIndex = this.lastBidder;
-    } else {
-      // 都不叫，第一个叫的人自动当地主
-      this.landlordIndex = this.bidStarter;
+  // 倒计时回调：超时自动「不叫」/「不抢」
+  _applyAutoBid() {
+    if (this.over || this.phase !== 'bidding') return;
+    const p = this.players.find(pp => pp.index === this.bidCurrent);
+    if (!p) return;
+    const action = this.bidPhase === 'call' ? { bid: false } : { grab: false };
+    this._doBid(p, action);   // 内部清旧定时器并为下一轮设置新定时器
+    this._notify();
+  }
+
+  // 为当前叫/抢回合设置倒计时（phase 非 bidding 则清空）
+  _setBidTimer() {
+    this._clearBidTimer();
+    if (this.over || this.phase !== 'bidding') return;
+    const ms = this.bidPhase === 'call' ? BID_CALL_MS : BID_GRAB_MS;
+    this.bidDeadline = Date.now() + ms;
+    this._bidTimer = this._schedule(() => this._applyAutoBid(), ms);
+  }
+
+  _clearBidTimer() {
+    if (this._bidTimer) {
+      this._clearTimer(this._bidTimer);
+      this._bidTimer = null;
     }
+    this.bidDeadline = null;
+  }
+
+  // 为当前出牌回合设置倒计时；接上家牌且无牌可出时用 3s，否则 30s
+  _setPlayTimer() {
+    this._clearPlayTimer();
+    if (this.over || this.phase !== 'play') return;
+    let ms = PLAY_MS;
+    if (this.lastPlay !== null && this.lastPlayPlayer !== this.currentTurn) {
+      const lastInfo = identifyType(this.lastPlay.cards);
+      if (lastInfo && !findHint(this.hands[this.currentTurn], lastInfo)) ms = NO_PLAY_MS;
+    }
+    this.playDeadline = Date.now() + ms;
+    this._playTimer = this._schedule(() => this._applyAutoPlay(), ms);
+  }
+
+  _clearPlayTimer() {
+    if (this._playTimer) {
+      this._clearTimer(this._playTimer);
+      this._playTimer = null;
+    }
+    this.playDeadline = null;
+  }
+
+  // 出牌超时：接上家牌→自动不出；自由出牌→自动出最小一张
+  _applyAutoPlay() {
+    if (this.over || this.phase !== 'play') return;
+    const p = this.players.find(pp => pp.index === this.currentTurn);
+    if (!p) return;
+    if (this.lastPlay === null || this.lastPlayPlayer === this.currentTurn) {
+      // 自由出牌：出最小一张单牌
+      const hand = this.hands[this.currentTurn];
+      if (hand.length === 0) return;
+      this._doPlay(p, { cards: [hand[0]] });
+    } else {
+      // 接上家牌：不出
+      this._doPlay(p, { pass: true });
+    }
+    this._notify();
+  }
+
+  // 已抢过地主的玩家轮到时自动「不抢」，直到轮到可决策者或回到 lastGrabber
+  _bidAutoAdvance() {
+    while (this.bidPhase === 'grab'
+           && this.bidCurrent !== this.lastGrabber
+           && this.grabbedSet.has(this.bidCurrent)) {
+      this.bidHistory.push({ index: this.bidCurrent, action: 'giveup' });
+      this.bidCurrent = (this.bidCurrent + 1) % 3;
+    }
+    // 回到最后一个叫/抢的人 → 抢地主结束
+    if (this.bidPhase === 'grab' && this.bidCurrent === this.lastGrabber) {
+      this._resolveBid();
+    }
+  }
+
+  // 流局：重新发牌并重新开始叫地主
+  _redeal() {
+    this.redealCount++;
+    if (this.redealCount > 5) {
+      // 极端兜底：重发太多次仍无人叫，强制首发当地主
+      this.lastGrabber = this.bidStarter;
+      this._resolveBid();
+      return;
+    }
+    const deck = shuffle(makeDeck());
+    this.hands = [[], [], []];
+    for (let i = 0; i < 51; i++) this.hands[i % 3].push(deck[i]);
+    this.dizhuCards = [deck[51], deck[52], deck[53]];
+    for (let i = 0; i < 3; i++) this.hands[i] = sortCards(this.hands[i]);
+    this.bidStarter = Math.floor(Math.random() * 3);
+    this.bidCurrent = this.bidStarter;
+    this.bidHistory = [];
+    this.bidPhase = 'call';
+    this.lastGrabber = -1;
+    this.grabbedSet = new Set();
+    this.grabCount = 0;
+  }
+
+  _resolveBid() {
+    this.landlordIndex = this.lastGrabber;
     // 地主拿底牌
     this.hands[this.landlordIndex].push(...this.dizhuCards);
     this.hands[this.landlordIndex] = sortCards(this.hands[this.landlordIndex]);
     this.currentTurn = this.landlordIndex;
     this.phase = 'play';
+    this._setPlayTimer();   // 地主首手 30s 倒计时
   }
 
   _doPlay(player, action) {
@@ -323,6 +655,7 @@ export default class Doudizhu extends BaseGame {
       if (this.lastPlay === null || this.lastPlayPlayer === player.index) {
         return { ok: false, error: '你必须出牌' };
       }
+      this._clearPlayTimer();
       this.passCount++;
       // 连续 2 人不出 → 当前出牌者自由出
       if (this.passCount >= 2) {
@@ -331,6 +664,7 @@ export default class Doudizhu extends BaseGame {
         this.passCount = 0;
       }
       this._nextTurn();
+      this._setPlayTimer();
       return { ok: true };
     }
 
@@ -361,6 +695,7 @@ export default class Doudizhu extends BaseGame {
     }
 
     // 出牌成功
+    this._clearPlayTimer();
     this.hands[player.index] = handCopy;
     this.lastPlay = { cards: sortCards(cards), playerIndex: player.index, type: playType.type };
     this.lastPlayPlayer = player.index;
@@ -378,6 +713,7 @@ export default class Doudizhu extends BaseGame {
     }
 
     this._nextTurn();
+    this._setPlayTimer();
     return { ok: true };
   }
 
@@ -386,9 +722,12 @@ export default class Doudizhu extends BaseGame {
   }
 
   _endGame(winnerIndex) {
+    this._clearBidTimer();
+    this._clearPlayTimer();
+    if (this._dealTimer) { this._clearTimer(this._dealTimer); this._dealTimer = null; }
     this.over = true;
     this.phase = 'over';
-    const multiplier = Math.pow(2, this.bombCount);
+    const multiplier = Math.pow(2, this.bombCount + this.grabCount);
     const isLandlordWin = winnerIndex === this.landlordIndex;
     const delta = this.baseScore * multiplier;
 
@@ -437,23 +776,32 @@ export default class Doudizhu extends BaseGame {
   getPublicState() {
     return {
       phase: this.phase,
-      turnIndex: this.over ? -1 : (this.phase === 'bidding' ? this.bidCurrent : this.currentTurn),
+      turnIndex: this.over || this.phase === 'dealing' ? -1
+        : (this.phase === 'bidding' ? this.bidCurrent : this.currentTurn),
       landlordIndex: this.landlordIndex,
-      // 叫地主
+      // 叫地主 / 抢地主
       bidStarter: this.bidStarter,
       bidCurrent: this.bidCurrent,
-      bidHistory: this.bidHistory,
+      bidPhase: this.bidPhase,                 // 'call' | 'grab'
+      bidDeadline: this.bidDeadline,           // 当前叫/抢回合截止时刻（ms epoch），null=无
+      bidHistory: this.bidHistory,             // { index, action: 'call'|'pass'|'grab'|'giveup' }
+      bidGrabbed: [0, 1, 2].map(i => this.grabbedSet.has(i)),
+      lastGrabber: this.lastGrabber,
+      grabCount: this.grabCount,
+      // 底牌
+      dizhuCards: this.landlordIndex >= 0 ? this.dizhuCards : null,
+      dizhuRevealed: this.landlordIndex >= 0,
       // 出牌
       handsCount: this.hands.map(h => h.length),
       lastPlay: this.lastPlay,
-      dizhuCards: this.landlordIndex >= 0 ? this.dizhuCards : null,
       bombCount: this.bombCount,
       passCount: this.passCount,
       lastPlayPlayer: this.lastPlayPlayer,
+      playDeadline: this.playDeadline,    // 出牌回合截止时刻（ms epoch），null=无
       // 积分
       scores: this.scores,
       baseScore: this.baseScore,
-      multiplier: Math.pow(2, this.bombCount),
+      multiplier: Math.pow(2, this.bombCount + this.grabCount),
       // 附加
       players: this.players.map(p => ({ name: p.name, index: p.index })),
     };
@@ -462,10 +810,21 @@ export default class Doudizhu extends BaseGame {
   getPrivateState(playerId) {
     const p = this.players.find(p => p.id === playerId);
     const idx = p ? p.index : -1;
+    // 当前轮到此人且需接上家牌时，给出一手提示（找不到=无牌可出，前端点"提示"自动不出）
+    let hint = null;
+    if (idx >= 0 && this.phase === 'play' && idx === this.currentTurn
+        && this.lastPlay !== null && this.lastPlayPlayer !== idx) {
+      const lastInfo = identifyType(this.lastPlay.cards);
+      if (lastInfo) {
+        const h = findHint(this.hands[idx], lastInfo);
+        hint = h ? h.map(c => ({ rank: c.rank, suit: c.suit })) : null;
+      }
+    }
     return {
       ...this.getPublicState(),
       yourIndex: idx,
       hand: idx >= 0 ? this.hands[idx] : [],
+      hint,
     };
   }
 

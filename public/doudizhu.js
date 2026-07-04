@@ -15,11 +15,15 @@ export const DoudizhuRenderer = {
   _private: null,
   _selected: new Set(),   // cardKey set
   _elements: {},
+  _dealingRendered: false,   // 发牌动画只播一次
+  _countdownInterval: null,
 
   mount(container, ctx) {
     this._ctx = ctx;
     this._container = container;
     this._selected = new Set();
+    this._dealingRendered = false;
+    this._stopCountdown();
     container.innerHTML = '';
 
     const root = document.createElement('div');
@@ -27,35 +31,48 @@ export const DoudizhuRenderer = {
     root.innerHTML = `
       <div class="ddz-info" id="ddzInfo"></div>
       <div class="ddz-table">
-        <div class="ddz-opponent ddz-opponent-top" id="ddzOppTop">
-          <div class="ddz-opp-name" id="ddzOppTopName"></div>
-          <div class="ddz-opp-cards" id="ddzOppTopCards"></div>
-        </div>
-        <div class="ddz-middle-row">
-          <div class="ddz-opponent ddz-opponent-left" id="ddzOppLeft">
+        <div class="ddz-dizhu-cards" id="ddzDizhuCards"></div>
+        <div class="ddz-opponents">
+          <div class="ddz-opp ddz-opp-left" id="ddzOppLeft">
+            <div class="ddz-opp-avatarwrap">
+              <div class="ddz-opp-avatar" id="ddzOppLeftAvatar"></div>
+              <div class="ddz-countdown-badge" id="ddzOppLeftCountdown"></div>
+            </div>
             <div class="ddz-opp-name" id="ddzOppLeftName"></div>
+            <div class="ddz-opp-count" id="ddzOppLeftCount"></div>
             <div class="ddz-opp-cards" id="ddzOppLeftCards"></div>
           </div>
-          <div class="ddz-center">
-            <div class="ddz-dizhu-cards" id="ddzDizhuCards"></div>
-            <div class="ddz-play-area" id="ddzPlayArea"></div>
-            <div class="ddz-bid-area hidden" id="ddzBidArea"></div>
+          <div class="ddz-opp ddz-opp-right" id="ddzOppRight">
+            <div class="ddz-opp-avatarwrap">
+              <div class="ddz-opp-avatar" id="ddzOppRightAvatar"></div>
+              <div class="ddz-countdown-badge" id="ddzOppRightCountdown"></div>
+            </div>
+            <div class="ddz-opp-name" id="ddzOppRightName"></div>
+            <div class="ddz-opp-count" id="ddzOppRightCount"></div>
+            <div class="ddz-opp-cards" id="ddzOppRightCards"></div>
           </div>
-          <div class="ddz-spacer"></div>
         </div>
-        <div class="ddz-play-info" id="ddzPlayInfo"></div>
+        <div class="ddz-center">
+          <div class="ddz-play-area" id="ddzPlayArea"></div>
+          <div class="ddz-bid-area hidden" id="ddzBidArea"></div>
+          <div class="ddz-play-info" id="ddzPlayInfo"></div>
+        </div>
         <div class="ddz-hand-area">
+          <div class="ddz-hand-bar">
+            <div class="ddz-my-countdown" id="ddzMyCountdown"></div>
+            <div class="ddz-actions" id="ddzActions"></div>
+          </div>
           <div class="ddz-hand" id="ddzHand"></div>
-          <div class="ddz-actions" id="ddzActions"></div>
         </div>
       </div>
     `;
     container.appendChild(root);
 
     // 缓存元素引用
-    const ids = ['ddzInfo','ddzOppTop','ddzOppTopName','ddzOppTopCards',
-      'ddzOppLeft','ddzOppLeftName','ddzOppLeftCards',
-      'ddzDizhuCards','ddzPlayArea','ddzBidArea','ddzPlayInfo','ddzHand','ddzActions'];
+    const ids = ['ddzInfo',
+      'ddzOppLeft','ddzOppLeftAvatar','ddzOppLeftName','ddzOppLeftCount','ddzOppLeftCards','ddzOppLeftCountdown',
+      'ddzOppRight','ddzOppRightAvatar','ddzOppRightName','ddzOppRightCount','ddzOppRightCards','ddzOppRightCountdown',
+      'ddzDizhuCards','ddzPlayArea','ddzBidArea','ddzPlayInfo','ddzHand','ddzActions','ddzMyCountdown'];
     for (const id of ids) this._elements[id] = root.querySelector('#' + id);
 
     this._render(ctx.publicState, ctx.privateState);
@@ -73,6 +90,12 @@ export const DoudizhuRenderer = {
   // ── 主渲染 ──
   _render(pub, priv) {
     if (!pub) return;
+    // 发牌阶段只渲染一次，驱动 CSS 逐张出现动画；重连重播无妨但不重复
+    if (pub.phase === 'dealing' && this._dealingRendered) return;
+    const isDealing = pub.phase === 'dealing';
+    if (isDealing) this._dealingRendered = true;
+    else this._dealingRendered = false;
+
     this._state = pub;
     this._private = priv;
 
@@ -82,8 +105,39 @@ export const DoudizhuRenderer = {
     this._renderOpponents(pub, myIdx);
     this._renderDizhuCards(pub);
     this._renderPlayArea(pub, myIdx);
-    this._renderHand(priv);
+    this._renderHand(priv, isDealing);
     this._renderActions(pub, myIdx);
+
+    // 倒计时放到当前决策玩家所在位置
+    this._placeCountdown(pub, myIdx);
+    const deadline = pub.phase === 'bidding' ? pub.bidDeadline
+      : pub.phase === 'play' ? pub.playDeadline : null;
+    if (deadline) this._startCountdown(deadline);
+    else this._stopCountdown();
+  },
+
+  // 把倒计时徽章挂到当前决策者（自己 / 左上 / 右上）的槽位
+  _placeCountdown(pub, myIdx) {
+    const keys = ['ddzMyCountdown', 'ddzOppLeftCountdown', 'ddzOppRightCountdown'];
+    for (const k of keys) {
+      const el = this._elements[k];
+      if (el) { el.textContent = ''; el.classList.remove('active'); }
+    }
+    const cur = pub.turnIndex;
+    let deadline;
+    if (pub.phase === 'bidding') deadline = pub.bidDeadline;
+    else if (pub.phase === 'play') deadline = pub.playDeadline;
+    else deadline = null;
+    if (deadline == null || myIdx < 0 || cur == null || cur < 0) {
+      this._elements.ddzCountdown = null;
+      return;
+    }
+    let slot;
+    if (cur === myIdx) slot = this._elements.ddzMyCountdown;
+    else if (cur === (myIdx + 1) % 3) slot = this._elements.ddzOppLeftCountdown;
+    else if (cur === (myIdx + 2) % 3) slot = this._elements.ddzOppRightCountdown;
+    if (slot) { slot.classList.add('active'); this._elements.ddzCountdown = slot; }
+    else this._elements.ddzCountdown = null;
   },
 
   // ── 信息栏 ──
@@ -101,16 +155,26 @@ export const DoudizhuRenderer = {
   // ── 对手 ──
   _renderOpponents(pub, myIdx) {
     const opps = this._getOpponents(pub, myIdx);
-    // 上方对手
-    if (opps[0]) {
-      this._elements.ddzOppTopName.textContent = opps[0].name + (opps[0].index === pub.landlordIndex ? ' 🃏' : '');
-      this._renderOppCards(this._elements.ddzOppTopCards, opps[0].count);
+    const slots = [
+      { avatar: this._elements.ddzOppLeftAvatar, name: this._elements.ddzOppLeftName, count: this._elements.ddzOppLeftCount, cards: this._elements.ddzOppLeftCards },
+      { avatar: this._elements.ddzOppRightAvatar, name: this._elements.ddzOppRightName, count: this._elements.ddzOppRightCount, cards: this._elements.ddzOppRightCards },
+    ];
+    for (let i = 0; i < slots.length; i++) {
+      const s = slots[i], o = opps[i];
+      if (!o) continue;
+      const isLandlord = pub.landlordIndex >= 0 && o.index === pub.landlordIndex;
+      s.avatar.textContent = this._avatarText(o.name);
+      s.avatar.classList.toggle('ddz-landlord', isLandlord);
+      s.name.textContent = o.name;
+      s.count.textContent = `剩 ${o.count} 张`;
+      this._renderOppCards(s.cards, o.count);
     }
-    // 左方对手
-    if (opps[1]) {
-      this._elements.ddzOppLeftName.textContent = opps[1].name + (opps[1].index === pub.landlordIndex ? ' 🃏' : '');
-      this._renderOppCards(this._elements.ddzOppLeftCards, opps[1].count);
-    }
+  },
+
+  _avatarText(name) {
+    if (!name) return '👤';
+    const ch = name.trim()[0];
+    return ch ? ch.toUpperCase() : '👤';
   },
 
   _getOpponents(pub, myIdx) {
@@ -130,33 +194,42 @@ export const DoudizhuRenderer = {
 
   _renderOppCards(container, count) {
     container.innerHTML = '';
-    for (let i = 0; i < Math.min(count, 20); i++) {
+    const show = Math.min(count, 10);
+    for (let i = 0; i < show; i++) {
       const card = document.createElement('div');
       card.className = 'ddz-card-back';
       container.appendChild(card);
-    }
-    if (count > 20) {
-      const more = document.createElement('span');
-      more.className = 'ddz-card-more';
-      more.textContent = `+${count - 20}`;
-      container.appendChild(more);
     }
   },
 
   // ── 底牌 ──
   _renderDizhuCards(pub) {
     const el = this._elements.ddzDizhuCards;
-    if (!pub.dizhuCards || pub.landlordIndex < 0) {
-      el.innerHTML = '';
+    // 地主确定后：翻开全员可见
+    if (pub.dizhuRevealed && pub.dizhuCards) {
+      el.innerHTML = '<div class="ddz-dizhu-label">底牌</div>';
+      const row = document.createElement('div');
+      row.className = 'ddz-dizhu-row';
+      for (const c of pub.dizhuCards) {
+        row.appendChild(this._createCardEl(c, false));
+      }
+      el.appendChild(row);
       return;
     }
-    el.innerHTML = '<div class="ddz-dizhu-label">底牌</div>';
-    const row = document.createElement('div');
-    row.className = 'ddz-dizhu-row';
-    for (const c of pub.dizhuCards) {
-      row.appendChild(this._createCardEl(c, false));
+    // 发牌/叫地主阶段：3 张倒扣底牌
+    if (pub.phase === 'dealing' || pub.phase === 'bidding') {
+      el.innerHTML = '<div class="ddz-dizhu-label">底牌</div>';
+      const row = document.createElement('div');
+      row.className = 'ddz-dizhu-row';
+      for (let i = 0; i < 3; i++) {
+        const back = document.createElement('div');
+        back.className = 'ddz-card-back ddz-dizhu-back';
+        row.appendChild(back);
+      }
+      el.appendChild(row);
+      return;
     }
-    el.appendChild(row);
+    el.innerHTML = '';
   },
 
   // ── 出牌区域 ──
@@ -168,6 +241,7 @@ export const DoudizhuRenderer = {
     infoEl.classList.remove('ddz-bomb-effect');
     if (pub.phase === 'bidding') {
       infoEl.textContent = '';
+      this._renderBidArea(pub, myIdx);
       return;
     }
 
@@ -205,22 +279,40 @@ export const DoudizhuRenderer = {
 
   _renderBidArea(pub, myIdx) {
     const el = this._elements.ddzBidArea;
+    this._elements.ddzCountdown = null;
+
+    // 发牌阶段：显示提示
+    if (pub.phase === 'dealing') {
+      el.classList.remove('hidden');
+      el.innerHTML = '<div class="ddz-bid-phase">发牌中…</div>';
+      return;
+    }
     if (pub.phase !== 'bidding') {
       el.classList.add('hidden');
+      el.innerHTML = '';
       return;
     }
     el.classList.remove('hidden');
     el.innerHTML = '';
 
-    // 叫地主历史
+    // 阶段标题（含当前决策者）
+    const curName = pub.players?.[pub.bidCurrent]?.name || `玩家${(pub.bidCurrent ?? 0) + 1}`;
+    const phaseLabel = document.createElement('div');
+    phaseLabel.className = 'ddz-bid-phase';
+    phaseLabel.textContent = (pub.bidPhase === 'grab' ? '抢地主' : '叫地主') + ' · ' + curName;
+    el.appendChild(phaseLabel);
+
+    // 叫/抢地主历史
+    const ACTION_TEXT = { call: '叫地主', pass: '不叫', grab: '抢地主', giveup: '不抢' };
     if (pub.bidHistory && pub.bidHistory.length > 0) {
       const hist = document.createElement('div');
       hist.className = 'ddz-bid-history';
       for (const h of pub.bidHistory) {
         const name = pub.players?.[h.index]?.name || `玩家${h.index + 1}`;
+        const act = h.action || (h.bid ? 'call' : 'pass'); // 兼容旧布尔格式
         const span = document.createElement('span');
-        span.textContent = `${name}: ${h.bid ? '叫地主' : '不叫'}`;
-        span.className = h.bid ? 'ddz-bid-yes' : 'ddz-bid-no';
+        span.textContent = `${name}: ${ACTION_TEXT[act] || act}`;
+        span.className = (act === 'call' || act === 'grab') ? 'ddz-bid-yes' : 'ddz-bid-no';
         hist.appendChild(span);
       }
       el.appendChild(hist);
@@ -228,19 +320,47 @@ export const DoudizhuRenderer = {
   },
 
   // ── 手牌 ──
-  _renderHand(priv) {
+  _renderHand(priv, isDealing = false) {
     const el = this._elements.ddzHand;
     if (!priv || !priv.hand) { el.innerHTML = ''; return; }
 
     el.innerHTML = '';
+    // 手牌已按 rank 升序，左→右即小→大；发牌时逐张出现
     for (let i = 0; i < priv.hand.length; i++) {
       const c = priv.hand[i];
       const key = this._cardKey(c);
       const cardEl = this._createCardEl(c, true);
+      if (isDealing) {
+        cardEl.classList.add('ddz-card-dealing');
+        cardEl.style.animationDelay = (i * 0.2) + 's';
+      }
       if (this._selected.has(key)) cardEl.classList.add('ddz-card-selected');
       cardEl.addEventListener('click', () => this._toggleSelect(key, cardEl));
       el.appendChild(cardEl);
     }
+  },
+
+  // ── 叫/抢倒计时 ──
+  _startCountdown(deadline) {
+    this._stopCountdown();
+    const el = this._elements.ddzCountdown;
+    if (!el || !deadline) return;
+    const tick = () => {
+      const rem = Math.max(0, deadline - Date.now());
+      el.textContent = Math.ceil(rem / 1000) + 's';
+      if (rem <= 0) this._stopCountdown();
+    };
+    tick();
+    this._countdownInterval = setInterval(tick, 200);
+  },
+
+  _stopCountdown() {
+    if (this._countdownInterval) {
+      clearInterval(this._countdownInterval);
+      this._countdownInterval = null;
+    }
+    const el = this._elements.ddzCountdown;
+    if (el) el.textContent = '';
   },
 
   // ── 操作按钮 ──
@@ -249,15 +369,34 @@ export const DoudizhuRenderer = {
     el.innerHTML = '';
 
     if (pub.phase === 'bidding' && pub.bidCurrent === myIdx && pub.turnIndex === myIdx) {
-      const btnBid = document.createElement('button');
-      btnBid.className = 'primary';
-      btnBid.textContent = '叫地主';
-      btnBid.addEventListener('click', () => this._ctx.client.action({ bid: true }));
-      const btnPass = document.createElement('button');
-      btnPass.textContent = '不叫';
-      btnPass.addEventListener('click', () => this._ctx.client.action({ bid: false }));
-      el.appendChild(btnBid);
-      el.appendChild(btnPass);
+      if (pub.bidPhase === 'grab') {
+        // 抢地主阶段
+        const canGrab = !(pub.bidGrabbed && pub.bidGrabbed[myIdx]);
+        if (canGrab) {
+          const btnGrab = document.createElement('button');
+          btnGrab.className = 'ddz-btn-bid';
+          btnGrab.textContent = '抢地主';
+          btnGrab.addEventListener('click', () => this._ctx.client.action({ grab: true }));
+          el.appendChild(btnGrab);
+        }
+        const btnNo = document.createElement('button');
+        btnNo.className = 'ddz-btn-nobid';
+        btnNo.textContent = '不抢';
+        btnNo.addEventListener('click', () => this._ctx.client.action({ grab: false }));
+        el.appendChild(btnNo);
+      } else {
+        // 叫地主阶段
+        const btnBid = document.createElement('button');
+        btnBid.className = 'ddz-btn-bid';
+        btnBid.textContent = '叫地主';
+        btnBid.addEventListener('click', () => this._ctx.client.action({ bid: true }));
+        const btnPass = document.createElement('button');
+        btnPass.className = 'ddz-btn-nobid';
+        btnPass.textContent = '不叫';
+        btnPass.addEventListener('click', () => this._ctx.client.action({ bid: false }));
+        el.appendChild(btnBid);
+        el.appendChild(btnPass);
+      }
       return;
     }
 
@@ -265,7 +404,7 @@ export const DoudizhuRenderer = {
       const canPass = pub.lastPlay !== null && pub.lastPlayPlayer !== myIdx;
 
       const btnPlay = document.createElement('button');
-      btnPlay.className = 'primary';
+      btnPlay.className = 'ddz-btn-play';
       btnPlay.textContent = '出牌';
       btnPlay.addEventListener('click', () => this._doPlay());
 
@@ -273,6 +412,7 @@ export const DoudizhuRenderer = {
 
       if (canPass) {
         const btnPass = document.createElement('button');
+        btnPass.className = 'ddz-btn-pass';
         btnPass.textContent = '不出';
         btnPass.addEventListener('click', () => this._ctx.client.action({ pass: true }));
         el.appendChild(btnPass);
@@ -280,9 +420,37 @@ export const DoudizhuRenderer = {
 
       const btnHint = document.createElement('button');
       btnHint.textContent = '提示';
-      btnHint.className = 'ghost';
+      btnHint.className = 'ddz-btn-hint';
       btnHint.addEventListener('click', () => this._showHint());
       el.appendChild(btnHint);
+    }
+  },
+
+  // ── 提示：用服务端给出的 hint 选牌；无牌可出时自动不出 ──
+  _showHint() {
+    const priv = this._private;
+    const pub = this._state;
+    if (!priv || !priv.hand || !pub) return;
+    if (pub.phase !== 'play' || pub.turnIndex !== priv.yourIndex) return;
+
+    // 自由出牌：提示最小单张
+    if (!pub.lastPlay || pub.lastPlayPlayer === priv.yourIndex) {
+      this._selected.clear();
+      if (priv.hand.length > 0) this._selected.add(this._cardKey(priv.hand[0]));
+      this._renderHand(priv);
+      this._renderActions(pub, priv.yourIndex);
+      return;
+    }
+
+    // 接上家牌：用服务端 hint
+    if (priv.hint && priv.hint.length > 0) {
+      this._selected.clear();
+      for (const c of priv.hint) this._selected.add(this._cardKey(c));
+      this._renderHand(priv);
+      this._renderActions(pub, priv.yourIndex);
+    } else {
+      // 无牌可出 → 自动不出
+      this._ctx.client.action({ pass: true });
     }
   },
 
@@ -294,74 +462,6 @@ export const DoudizhuRenderer = {
     const cards = priv.hand.filter(c => this._selected.has(this._cardKey(c)));
     this._ctx.client.action({ cards });
     this._selected.clear();
-  },
-
-  // ── 提示（简单版：找第一个能管上的牌） ──
-  _showHint() {
-    const priv = this._private;
-    const pub = this._state;
-    if (!priv || !priv.hand || !pub) return;
-
-    this._selected.clear();
-    // 如果没有上一手，提示出最小的单牌
-    if (!pub.lastPlay || pub.lastPlayPlayer === priv.yourIndex) {
-      if (priv.hand.length > 0) {
-        const c = priv.hand[0];
-        this._selected.add(this._cardKey(c));
-      }
-    } else {
-      // 简单提示：找第一个能管上的组合
-      const hint = this._findBeat(priv.hand, pub.lastPlay);
-      if (hint) {
-        for (const c of hint) this._selected.add(this._cardKey(c));
-      }
-    }
-    this._renderHand(priv);
-    this._renderActions(pub, priv.yourIndex);
-  },
-
-  _findBeat(hand, lastPlay) {
-    // 简化版提示：只处理单张、对子、三条、炸弹
-    const lastCards = lastPlay.cards;
-    const lastRank = lastCards[0]?.rank;
-    if (!lastRank) return null;
-
-    // 找能管上的单张
-    if (lastCards.length === 1) {
-      for (const c of hand) {
-        if (c.rank > lastRank) return [c];
-      }
-      // 找炸弹
-      return this._findBomb(hand);
-    }
-
-    // 找能管上的对子
-    if (lastCards.length === 2) {
-      const counts = new Map();
-      for (const c of hand) counts.set(c.rank, (counts.get(c.rank) || 0) + 1);
-      for (const [r, cnt] of counts) {
-        if (cnt >= 2 && r > lastRank) {
-          return hand.filter(c => c.rank === r).slice(0, 2);
-        }
-      }
-      return this._findBomb(hand);
-    }
-
-    // 更复杂的牌型：直接找炸弹
-    return this._findBomb(hand);
-  },
-
-  _findBomb(hand) {
-    const counts = new Map();
-    for (const c of hand) counts.set(c.rank, (counts.get(c.rank) || 0) + 1);
-    for (const [r, cnt] of counts) {
-      if (cnt === 4) return hand.filter(c => c.rank === r);
-    }
-    // 火箭
-    const sj = hand.find(c => c.rank === 16);
-    const bj = hand.find(c => c.rank === 17);
-    if (sj && bj) return [sj, bj];
-    return null;
   },
 
   // ── 选牌切换 ──
@@ -428,12 +528,26 @@ export const DoudizhuRenderer = {
     const isJoker = c.rank >= 16;
     if (isJoker) {
       el.classList.add(c.rank === 17 ? 'ddz-card-bigjoker' : 'ddz-card-smalljoker');
-      el.innerHTML = `<div class="ddz-card-rank" style="color:${JOKER_COLOR[c.rank]}">${JOKER_TEXT[c.rank]}</div>`;
+      const col = JOKER_COLOR[c.rank];
+      const label = c.rank === 17 ? '大王' : '小王';
+      const corner = c.rank === 17 ? '大' : '小';
+      el.innerHTML = `
+        <div class="ddz-card-corner" style="color:${col}">
+          <span class="ddz-card-rank">JOKER</span>
+          <span class="ddz-card-suit">${corner}</span>
+        </div>
+        <div class="ddz-card-center" style="color:${col}">${label}</div>
+      `;
     } else {
       const color = SUIT_COLOR[c.suit] || '#1a1a2e';
+      const sym = SUIT_SYMBOL[c.suit] || '';
+      const rank = RANK_TEXT[c.rank] || c.rank;
       el.innerHTML = `
-        <div class="ddz-card-rank" style="color:${color}">${RANK_TEXT[c.rank] || c.rank}</div>
-        <div class="ddz-card-suit" style="color:${color}">${SUIT_SYMBOL[c.suit] || ''}</div>
+        <div class="ddz-card-corner" style="color:${color}">
+          <span class="ddz-card-rank">${rank}</span>
+          <span class="ddz-card-suit">${sym}</span>
+        </div>
+        <div class="ddz-card-center" style="color:${color}">${sym}</div>
       `;
     }
     return el;

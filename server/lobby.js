@@ -38,6 +38,7 @@ class Room {
     this.closed = false;
     this.pendingReq = null; // { reqType, fromId, timer } 待处理请求（悔棋/和棋）
     this.grace = null;     // { playerId, timer } 掉线宽限期
+    this._gameTimers = new Set(); // 游戏自主推进（发牌延时/叫地主倒计时）注册的定时器
   }
 
   gameActive() {
@@ -64,6 +65,15 @@ class Room {
   clearTransient() {
     this.clearPendingReq();
     this.clearGrace();
+    this.clearGameTimers();
+  }
+
+  /** 清理游戏自主推进注册的定时器（发牌延时/叫地主倒计时等） */
+  clearGameTimers() {
+    if (this._gameTimers) {
+      for (const t of this._gameTimers) clearTimeout(t);
+      this._gameTimers.clear();
+    }
   }
 
   /** READY 消息载荷 */
@@ -263,9 +273,23 @@ class Room {
     if (this.started) throw new Error('已开始');
     this.started = true;
     this.clearTransient();
+    this._gameTimers = new Set();
     const GameClass = getGame(this.gameType);
     const players = this.players.map((p) => ({ id: p.id, name: p.name, index: p.index }));
-    this.game = new GameClass(players, {});
+    // 注入自主推进通道：游戏可注册定时器并在回调里触发广播
+    const room = this;
+    const hooks = {
+      schedule: (fn, ms) => {
+        const t = setTimeout(fn, ms);
+        room._gameTimers.add(t);
+        return t;
+      },
+      clear: (h) => {
+        if (h) { clearTimeout(h); room._gameTimers.delete(h); }
+      },
+      notify: () => room.broadcastState(),
+    };
+    this.game = new GameClass(players, { hooks });
     // 先发 STARTED（每人各自私有视角），再发首帧状态
     for (const p of this.players) {
       this.send(p, {
@@ -276,6 +300,8 @@ class Room {
       });
     }
     this.broadcastState();
+    // 触发游戏自主启动（如斗地主发牌延时进入叫地主）
+    if (this.game.start) this.game.start();
   }
 }
 
